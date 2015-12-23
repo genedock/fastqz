@@ -375,6 +375,7 @@ f: input.fx? -> output
 #include <time.h>
 #include <pthread.h>
 #include "libzpaq.h"
+#include "fastq_qscale.h"
 using std::string;
 
 const int N=4096; // max FASTQ line length
@@ -556,15 +557,17 @@ int main(int argc, char** argv) {
           if (j==BUCKET) ++collisions;
           else index[hi+j]=(h&0xf8000000)+(i>>3);
         }
-        printf("indexed %s: %d of %d collisions\n",
+        printf("indexed %s: %d of %lu collisions\n",
           argv[4], collisions, ref.size()/8);
       }
     }
 
     // read input files
-    FILE *in, *out[4];  // fastq, fxh, fxb, fxq, fxa
+    gzFile in;
+    FILE *out[5];  // fastq, fxh, fxb, fxq, fxa
     int n, i, j, k, len, c;
-    in=fopen(argv[2], "rb");
+    //in=fopen(argv[2], "rb");
+    in=open_input_stream(argv[2]);
     if (!in) perror(argv[2]), exit(1);
     for (i=0; i<3+isref; ++i) {
       string fn=string(argv[3])+".fx"+"hbqa"[i];
@@ -572,15 +575,22 @@ int main(int argc, char** argv) {
       if (!out[i]) perror(fn.c_str()), exit(1);
     }
 
+    int qscale_index = fastq_qualscale(argv[2], in);
+    string fn=string(argv[3])+".fxs";
+    out[4]=fopen(fn.c_str(), "wb");
+    if (!out[4]) perror(fn.c_str()), exit(1);
+    fprintf(out[4],"%d",qscale_index);
+    fclose(out[4]);
+
     // Save read length, n
-    for (i=j=n=0; (c=getc(in))!=EOF && !n; ++i) {
+    for (i=j=n=0; (c=gzgetc(in))!=EOF && !n; ++i) {
       if (c==10 && j) n=i-j-1;
       else if (c==10) j=i;
     }
     if (n<1 || n>=N) error("read length must be 1..4095");
     printf("encoding %s -> %s read length %d\n",
       argv[2], argv[3], n);
-    rewind(in);
+    gzrewind(in);
     putc(n>>8, out[0]);
     putc(n&255, out[0]);
 
@@ -596,7 +606,7 @@ int main(int argc, char** argv) {
 
       // encode header as (j+1,k+1,len+1,xxx,0) meaning
       // add k to hbuf[..j], then len bytes match, followed by xxx,10.
-      for (i=j=k=len=0; (c=getc(in))!=EOF && c!=10; ++i) {
+      for (i=j=k=len=0; (c=gzgetc(in))!=EOF && c!=10; ++i) {
         if (i>=N) error("Line too long\n");
         if (c!=hbuf[i] && isdigit(c) && isdigit(hbuf[i]) && j<254
             && i<254 && i==len && (!j || j==i)) {
@@ -617,13 +627,15 @@ int main(int argc, char** argv) {
       putc(0, out[0]);
 
       // read base calls into bbuf coded as ACGT=0..3
-      for (i=0, len=0; (c=getc(in))!=EOF && c!=10; ++i) {
+      memset(hbuf,0,N);
+      for (i=0, len=0; (c=gzgetc(in))!=EOF && c!=10; ++i) {
         if (c==EOF) error("unexpected EOF");
         if (c!='N') {
           j=(c=='A')+(c=='C')*2+(c=='G')*3+(c=='T')*4;
           if (!j) error("expected base A,C,G,T,N");
           bbuf[len++]=j-1;
         }
+        hbuf[i]=c;
       }
       if (i!=n) error("wrong number of base calls");
 
@@ -704,8 +716,8 @@ int main(int argc, char** argv) {
       }
 
       // verify empty second header "+\n"
-      if (getc(in)!='+') error("expected +");
-      if (getc(in)!=10) error("expected newline after +");
+      if (gzgetc(in)!='+') error("expected +");
+      if (gzgetc(in)!=10) error("expected newline after +");
 
       // encode quality scores
       // c=33..104 -> c-32
@@ -715,34 +727,72 @@ int main(int argc, char** argv) {
       // 71... -> 200+len
       len=0; // pending output bytes
       j=k=0; // last 2 bytes
-      for (i=0; (c=getc(in))!=EOF; ++i, k=j, j=c) {
-        if (c!=10 && (c<33 || c>104))
-          error("expected quality score in 33..104");
-        if (quality>1 && c>35) c-=(c-35)%quality;
-        if (c==35 && (len==0 || j==35)) ++len;
-        else if (len==0 && c>=64 && c<=71) ++len;
-        else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len;
-        else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len;
-        else if (c==10 && (len==0 || j==35)) break;
-        else {  // must write pending output
-          ++len;  // c is pending
-          while (len>1 && j==35)
-            putc(3, out[2]), --len;
-          if (len>3 && j==71 && k==71)
-            putc(199+len, out[2]), len=1;
-          if (len==3) {
-            if (c>=68 && c<=71)
-              putc(137+(k-68)+4*(j-68)+16*(c-68), out[2]), len=0;
-            else
-              putc(73+(k-64)+8*(j-64), out[2]), len=1;
+      if (qscale_index >1 || qscale_index<0) {
+        for (i=0; (c=gzgetc(in))!=EOF; ++i, k=j, j=c) {
+          if (c!=10) {
+            c-=31;
+            if (c<33 || c>104) error("expected quality score in 33..104");
           }
-          if (len==2) {
-            if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out[2]), len=0;
-            else putc(j-32, out[2]), len=1;
+          if (hbuf[i]=='N') c=33;
+          if (quality>1 && c>35) c-=(c-35)%quality;
+          if (c==35 && (len==0 || j==35)) ++len;
+          else if (len==0 && c>=64 && c<=71) ++len;
+          else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len;
+          else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len;
+          else if (c==10 && (len==0 || j==35)) break;
+          else {  // must write pending output
+            ++len;  // c is pending
+            while (len>1 && j==35)
+              putc(3, out[2]), --len;
+            if (len>3 && j==71 && k==71)
+              putc(199+len, out[2]), len=1;
+            if (len==3) {
+              if (c>=68 && c<=71)
+                putc(137+(k-68)+4*(j-68)+16*(c-68), out[2]), len=0;
+              else
+                putc(73+(k-64)+8*(j-64), out[2]), len=1;
+            }
+            if (len==2) {
+              if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out[2]), len=0;
+              else putc(j-32, out[2]), len=1;
+            }
+            if (len==1) {
+              if (c==10) break;
+              if (c!=35 && (c<64 || c>71)) putc(c-32, out[2]), len=0;
+            }
           }
-          if (len==1) {
-            if (c==10) break;
-            if (c!=35 && (c<64 || c>71)) putc(c-32, out[2]), len=0;
+        }
+      }else{
+        for (i=0; (c=gzgetc(in))!=EOF; ++i, k=j, j=c) {
+          if (c!=10 && (c<33 || c>104))
+            error("expected quality score in 33..104");
+          if (hbuf[i]=='N') c=33;
+          if (quality>1 && c>35) c-=(c-35)%quality;
+          if (c==35 && (len==0 || j==35)) ++len;
+          else if (len==0 && c>=64 && c<=71) ++len;
+          else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len;
+          else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len;
+          else if (c==10 && (len==0 || j==35)) break;
+          else {  // must write pending output
+            ++len;  // c is pending
+            while (len>1 && j==35)
+              putc(3, out[2]), --len;
+            if (len>3 && j==71 && k==71)
+              putc(199+len, out[2]), len=1;
+            if (len==3) {
+              if (c>=68 && c<=71)
+                putc(137+(k-68)+4*(j-68)+16*(c-68), out[2]), len=0;
+              else
+                putc(73+(k-64)+8*(j-64), out[2]), len=1;
+            }
+            if (len==2) {
+              if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out[2]), len=0;
+              else putc(j-32, out[2]), len=1;
+            }
+            if (len==1) {
+              if (c==10) break;
+              if (c!=35 && (c<64 || c>71)) putc(c-32, out[2]), len=0;
+            }
           }
         }
       }
@@ -751,7 +801,7 @@ int main(int argc, char** argv) {
     }
     putc(base, out[1]);
     for (i=2+isref; i>=0; --i) fclose(out[i]);
-    fclose(in);
+    gzclose(in);
     index.resize(0);
     ref.resize(0);
 
@@ -816,7 +866,7 @@ int main(int argc, char** argv) {
     if (isref) readref(ref, argv[4]);
 
     // open  files
-    FILE *in[4], *out;  // fxh, fxb, fxq, fxa, fastq
+    FILE *in[5], *out;  // fxh, fxb, fxq, fxa, fastq
     int i, j, k, c, n;
     for (i=0; i<3+isref; ++i) {
       string fn=string(argv[2])+".fx"+"hbqa"[i];
@@ -825,6 +875,15 @@ int main(int argc, char** argv) {
     }
     out=fopen(argv[3], "wb");
     if (!out) perror(argv[3]), exit(1);
+
+    string fn=string(argv[2])+".fxs";
+    in[4]=fopen(fn.c_str(), "rb");
+    if (!in[4]) perror(fn.c_str()), exit(1);
+    int qscale_index=0;
+    fscanf(in[4],"%d",&qscale_index);
+    fprintf(stderr,"qscale_index: %d\n",qscale_index);
+    fclose(in[4]);
+    remove(fn.c_str());
 
     // get read length, n
     n=getc(in[0]);
@@ -941,7 +1000,17 @@ int main(int argc, char** argv) {
       putc(10, out);
 
       // write quality scores
-      for (i=0; i<n; ++i) putc(qbuf[i], out);
+      if (qscale_index >1 || qscale_index <0){
+        for (i=0; i<n; ++i){
+          if (qbuf[i]==33) qbuf[i]=35;
+          putc(qbuf[i]+31, out);
+        }
+      }else{
+        for (i=0; i<n; ++i){
+          if (qbuf[i]==33) qbuf[i]=35;
+          putc(qbuf[i], out);
+        }
+      }
       putc(10, out);
     }
     fclose(out);
