@@ -513,11 +513,11 @@ void readindex(libzpaq::Array<unsigned int>& index, const char* filename) {
 
 #define openOutputFiles(isref,outPrefix,out) \
 do{ \
-  int i; \
-  for (i=0; i<3+isref; ++i) { \
-    string fn=string(outPrefix)+".fx"+"hbqa"[i]; \
-    out[i]=fopen(fn.c_str(), "wb"); \
-    if (!out[i]) perror(fn.c_str()), exit(1); \
+  int index; \
+  for (index=0; index<3+isref; ++index) { \
+    string fn=string(outPrefix)+".fx"+"hbqa"[index]; \
+    out[index]=fopen(fn.c_str(), "wb"); \
+    if (!out[index]) perror(fn.c_str()), exit(1); \
   } \
 }while(0)
 
@@ -699,11 +699,69 @@ do{ \
   } \
 }while(0)
 
-int main(int argc, char** argv) {
+typedef struct _thread_arg_
+{
+  Fastq *chunk;
+  int n;
+  int isref;
+  int quality;
+  const char *outfilePrefix;
+  libzpaq::Array<unsigned int> index;
+  libzpaq::Array<unsigned char> ref;
+  int chunkLen ;
+}thread_arg_t;
 
+void *threadEncode64(void *argument){
+  thread_arg_t *thread_arg = (thread_arg_t *)argument;
+  unsigned char hbuf[N]={0};  // previous header
+  unsigned char bbuf[N]={0};  // one sequence
+  int bi,len,base=0;
+  int matches[N+3]={0},match_sum=0, base_sum=0;
+  FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
+  openOutputFiles(thread_arg->isref,thread_arg->outfilePrefix,out);
+  saveReadLength(thread_arg->n,out[0]);
+  char *p=NULL;
+  for (bi=0; bi < thread_arg->chunkLen; ++bi){
+    for (p=(thread_arg->chunk+bi)->quality;*p!=10;p++) *p-=31;
+    encodeHeader((thread_arg->chunk+bi)->name,hbuf,out[0]);
+    readBase((thread_arg->chunk+bi)->seq,len,thread_arg->n,hbuf);
+    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,out[3],out[1]);
+    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,out[2]);
+    free_Fastq(thread_arg->chunk+bi);
+  }
+  putc(base, out[1]);
+  int i;
+  for (i=2+thread_arg->isref; i>=0; --i) fclose(out[i]);
+  print_match_statistics(base_sum,match_sum,matches,thread_arg->n);
+  pthread_exit(NULL);
+}
+
+void *threadEncode33(void *argument){
+  thread_arg_t *thread_arg = (thread_arg_t *)argument;
+  unsigned char hbuf[N]={0};  // previous header
+  unsigned char bbuf[N]={0};  // one sequence
+  int bi,len,base=0;
+  int matches[N+3]={0},match_sum=0, base_sum=0;
+  FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
+  openOutputFiles(thread_arg->isref,thread_arg->outfilePrefix,out);
+  saveReadLength(thread_arg->n,out[0]);
+  for (bi=0; bi < thread_arg->chunkLen; ++bi){
+    encodeHeader((thread_arg->chunk+bi)->name,hbuf,out[0]);
+    readBase((thread_arg->chunk+bi)->seq,len,thread_arg->n,hbuf);
+    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,out[3],out[1]);
+    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,out[2]);
+    free_Fastq(thread_arg->chunk+bi);
+  }
+  putc(base, out[1]);
+  int i;
+  for (i=2+thread_arg->isref; i>=0; --i) fclose(out[i]);
+  print_match_statistics(base_sum,match_sum,matches,thread_arg->n);
+  pthread_exit(NULL);
+}
+
+int main(int argc, char** argv) {
   // Start timer
   clock_t start=clock();
-
   // Check command line: {c|d|e|f} input output
   if (argc<4) {
     printf("fastqz v1.5 FASTQ compressor\n"
@@ -722,18 +780,20 @@ int main(int argc, char** argv) {
     __DATE__);
     exit(1);
   }
-
   const char cmd=argv[1][0]; // c,d,e,f
   int quality=atoi(argv[1]+1);
   if (quality<1) quality=1;
   const int isref=argc>4;    // 1 if a reference file supplied
+  int ncpu = getNumCores(), 
+  blockSize = argc>6 ? atoi(argv[6]) : 640000,
+  threads = argc>5 ? atoi(argv[5]) : ncpu;
+//  if (threads > ncpu) threads= ncpu;
   //const int BUCKET=8;        // index bucket size
   libzpaq::Array<unsigned char> ref;  // copy of packed reference genome
   libzpaq::Array<unsigned int> index; // hash table index to ref
 
   // Encode
   if (cmd=='e' || cmd=='c') {
-
     // Read reference file
     if (isref) {
       readref(ref, argv[4]);
@@ -743,14 +803,10 @@ int main(int argc, char** argv) {
       printf("load index at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
     }
 
-    // read input files
-    FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
-    int n, i, j, k, len, c;
+    int n, i, j, k;
+
     gzFile in=open_input_stream(argv[2]);
     if (!in) perror(argv[2]), exit(1);
-    openOutputFiles(isref,argv[3],out);
-    printf("open outfile at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
-
     int qscale_index = fastq_qualscale(argv[2], in);
     string fn=string(argv[3])+".fxs";
     FILE *out_qscale=fopen(fn.c_str(), "wb");
@@ -761,80 +817,76 @@ int main(int argc, char** argv) {
 
     // Save read length, n
     getReadLength(n,in,argv[2],argv[3]);
-    saveReadLength(n,out[0]);
-    printf("test read length at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
 
-    // encode
-    int base=0;  // packed bases in base 4
-    unsigned char hbuf[N]={0};  // previous header
-    unsigned char bbuf[N]={0};  // one sequence
-    int matches[N+3]={0},match_sum=0, base_sum=0;
-    int line=0;
-    
-    int blockSize = 640000,eofFlag=0,bi=0;
-    char *LineBuf = (char *)calloc(N,sizeof(char)),*p=NULL;
-    Fastq *chunk=(Fastq *)calloc(blockSize,sizeof(Fastq));
-    if (qscale_index >1 || qscale_index<0) {
-      for (line=0; 1; line++) {
-        int blockIndex = line % blockSize;
-        if ((!blockIndex && line) || eofFlag){
-          int chunkLen = !blockIndex ? blockSize : blockIndex-1;
-          for (bi=0; bi < chunkLen; ++bi){
-            for (p=(chunk+bi)->quality;*p!=10;p++) *p-=31;
-            encodeHeader((chunk+bi)->name,hbuf,out[0]);
-            readBase((chunk+bi)->seq,len,n,hbuf);
-            mapping(len,n,bbuf,index,ref,matches,match_sum,base_sum,base,out[3],out[1]);
-            encodeQual((chunk+bi)->quality,quality,hbuf,n,out[2]);
-            free_Fastq(chunk+bi);
-          }
-        }
-        if (eofFlag) break;
-        eofFlag = readNextNode(in,LineBuf,&chunk[blockIndex]);   
-      }
-    }else{
-      for (line=0; 1; line++) {
-        int blockIndex = line % blockSize;
-        if ((!blockIndex && line) || eofFlag){
-          int chunkLen = !blockIndex ? blockSize : blockIndex-1;
-          for (bi=0; bi < chunkLen; ++bi){
-            encodeHeader((chunk+bi)->name,hbuf,out[0]);
-            readBase((chunk+bi)->seq,len,n,hbuf);
-            mapping(len,n,bbuf,index,ref,matches,match_sum,base_sum,base,out[3],out[1]);
-            encodeQual((chunk+bi)->quality,quality,hbuf,n,out[2]);
-            free_Fastq(chunk+bi);
-          }
-        }
-        if (eofFlag) break;
-        eofFlag = readNextNode(in,LineBuf,&chunk[blockIndex]);
-      }
+    int line=0,eofFlag=0,blockCount=0;
+    char *LineBuf = (char *)calloc(N,sizeof(char)),ret[32];
+    Fastq **chunk=(Fastq **)calloc(threads,sizeof(Fastq *));
+    char **retBuf = (char **)calloc(threads,sizeof(char *));
+    int *chunkLen = (int *)calloc(threads,sizeof(int));
+    for (i=0;i<threads;i++){
+      retBuf[i]=(char *)calloc(512,sizeof(char));
+      chunk[i]=(Fastq *)calloc(blockSize,sizeof(Fastq));
     }
-    putc(base, out[1]);
-    for (i=2+isref; i>=0; --i) fclose(out[i]);
+
+    for (line=0,k=0; 1; line++) {
+      int blockIndex = line % blockSize;
+      if ((!blockIndex && line) || eofFlag) {
+        chunkLen[k++ % threads]=!eofFlag ? blockSize : blockIndex-1;
+        if (!eofFlag||(eofFlag && blockIndex>1)) ++blockCount;
+        int chunkIndex = blockCount % threads;
+        if ((!chunkIndex && line) || eofFlag) {
+          int chunkCount = !eofFlag ? threads : chunkIndex;
+          pthread_t *thread_handle = (pthread_t *)malloc(chunkCount * sizeof(pthread_t));
+          thread_arg_t *thread_args = (thread_arg_t *)malloc(chunkCount* sizeof(thread_arg_t));
+          for (j=0;j<chunkCount ;j++) {
+            sprintf(retBuf[j],"%s.%d",argv[3],((blockCount-1)/threads)*threads+j);
+            (thread_args+j)->chunk=chunk[j];
+            (thread_args+j)->n=n;
+            (thread_args+j)->isref=isref;
+            (thread_args+j)->quality=quality;
+            (thread_args+j)->outfilePrefix = retBuf[j];
+            (thread_args+j)->index = index;
+            (thread_args+j)->ref = ref;
+            (thread_args+j)->chunkLen = chunkLen[j];
+            pthread_create(thread_handle+j,NULL,(qscale_index >1 || qscale_index<0) ? threadEncode64 : threadEncode33,thread_args+j);
+          }
+          for(j = 0;j < chunkCount;j++){
+            pthread_join(*(thread_handle + j),NULL);
+          }
+          free(thread_args);
+          free(thread_handle);
+        }
+      }
+      if (eofFlag) break;
+      eofFlag = readNextNode(in,LineBuf,&chunk[blockCount % threads][blockIndex]);
+    }
     gzclose(in);
     index.resize(0);
     ref.resize(0);
     printf("encode file at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
 
-    print_match_statistics(base_sum,match_sum,matches,n);
-
     // compress each temporary file to .zpaq in a separate thread
+    
     if (cmd=='c') {
-      pthread_t tid[4];
-      pthread_attr_t attr; // thread joinable attribute
-      pthread_attr_init(&attr);
-      pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-      Job job[4];
-      for (i=0; i<3+isref; ++i) {
-        job[i].id=i;
-        job[i].input=string(argv[3])+".fx"+"hbqa"[i];
-        job[i].output=job[i].input+".zpaq";
-        pthread_create(&tid[i], &attr, compress, (void*)&job[i]);
-      }
+      for (k=0;k<blockCount;k++){
+        pthread_t tid[4];
+        pthread_attr_t attr; // thread joinable attribute
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+        Job job[4];
+        for (i=0; i<3+isref; ++i) {
+          job[i].id=i;
+          int2str(k,10,ret);
+          job[i].input=string(argv[3])+'.'+string(ret)+".fx"+"hbqa"[i];
+          job[i].output=job[i].input+".zpaq";
+          pthread_create(&tid[i], &attr, compress, (void*)&job[i]);
+        }
 
-      // wait until all jobs are done
-      for (i=0; i<3+isref; ++i) {
-        void* status;
-        pthread_join(tid[i], &status);
+        // wait until all jobs are done
+        for (i=0; i<3+isref; ++i) {
+          void* status;
+          pthread_join(tid[i], &status);
+        }
       }
     }
   }

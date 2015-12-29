@@ -79,8 +79,7 @@ class Array {
   T *data;     // user location of [0] on a 64 byte boundary
   size_t n;    // user size
   int offset;  // distance back in bytes to start of actual allocation
-  void operator=(const Array&);  // no assignment
-  Array(const Array&);  // no copy
+
 public:
   Array(size_t sz=0, int ex=0): data(0), n(0), offset(0) {
     resize(sz, ex);} // [0..sz-1] = 0

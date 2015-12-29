@@ -379,7 +379,6 @@ f: input.fx? -> output
 using std::string;
 
 const int N=4096; // max FASTQ line length
-const int BUCKET=8;
 
 // print error message and exit (may be called by libzpaq)
 void libzpaq::error(const char* msg) {
@@ -502,203 +501,6 @@ void readref(libzpaq::Array<unsigned char>& ref, const char* filename) {
   fclose(in);
 }
 
-void readindex(libzpaq::Array<unsigned int>& index, const char* filename) {
-  FILE* in=fopen(filename, "rb");
-  if (!in) perror(filename), exit(1);
-  int indexSize = (1<<27)+BUCKET;
-  index.resize(indexSize);
-  if (int(fread(&index[0], sizeof(unsigned int),index.isize(), in))!=indexSize) error("index read error");
-  fclose(in);
-}
-
-#define openOutputFiles(isref,outPrefix,out) \
-do{ \
-  int i; \
-  for (i=0; i<3+isref; ++i) { \
-    string fn=string(outPrefix)+".fx"+"hbqa"[i]; \
-    out[i]=fopen(fn.c_str(), "wb"); \
-    if (!out[i]) perror(fn.c_str()), exit(1); \
-  } \
-}while(0)
-
-#define getReadLength(n,in,infile,outfile) \
-do{ \
-  int i,j,c; \
-  for (i=j=n=0; (c=gzgetc(in))!=EOF && !n; ++i) { \
-    if (c==10 && j) n=i-j-1; \
-    else if (c==10) j=i; \
-  } \
-  if (n<1 || n>=N) error("read length must be 1..4095"); \
-  printf("encoding %s -> %s read length %d\n",infile, outfile, n); \
-  gzrewind(in); \
-}while(0)
-
-#define saveReadLength(n,out) \
-do{ \
-  putc(n>>8, out); \
-  putc(n&255, out); \
-}while(0)
-
-#define encodeHeader(in,hbuf,out) \
-do{ \
-  int i, j, k, len, c; \
-  for (i=j=k=len=0; (c=in[i])!=0; ++i) { \
-    if (i>=N) error("Line too long\n"); \
-    if (c!=hbuf[i] && isdigit(c) && isdigit(hbuf[i]) && j<254 && i<254 && i==len && (!j || j==i)) { \
-      int d=k*10+c-hbuf[i]; \
-      if (d>0 && d<254) hbuf[i]=c, k=d, j=i+1; \
-    } \
-    if (c==hbuf[i] && i==len && len<254) ++len; \
-    hbuf[i]=c; \
-  } \
-  putc(j+(j==0), out); \
-  putc(k+1, out); \
-  putc(len+1, out); \
-  for (j=len; j<i; ++j) putc(hbuf[j], out); \
-  putc(0, out); \
-}while(0)
-
-#define readBase(in,len,n,hbuf) \
-do{ \
-  int i, j, c; \
-  memset(hbuf,0,N); \
-  for (i=0, len=0; (c=in[i])!=0; ++i) { \
-    if (c==EOF) error("unexpected EOF"); \
-    if (c!='N') { \
-      j=(c=='A')+(c=='C')*2+(c=='G')*3+(c=='T')*4; \
-      if (!j) error("expected base A,C,G,T,N"); \
-      bbuf[len++]=j-1; \
-    } \
-    hbuf[i]=c; \
-  } \
-  if (i!=n) error("wrong number of base calls"); \
-}while(0)
-
-#define outputMismatch(len,ismatch,bm,bbuf,base,out) \
-do{ \
-  int i,j; \
-  for (i=0; i<len; ++i) { \
-    if (!ismatch || i>=(bm>>24&255) || i==(bm>>16&255) || i==(bm>>8&255) || i==(bm&255)) { \
-      j="\x01\x03\x04\x02"[bbuf[i]]; \
-      if (base*4+j>255) putc(base, out), base=0; \
-      base=base*4+j; \
-    } \
-  } \
-}while(0)
-
-#define mapping(len,n,bbuf,index,ref,matches,match_sum,base_sum,base,out1,out2) \
-do{ \
-  int i, j, k; \
-  unsigned long long hl=0; \
-  unsigned int bptr=0; \
-  int bdir=1,bm=0; \
-  bool ismatch=false; \
-  for (j=0; j<len; ++j) {  \
-    hl=hl*4+bbuf[j]; \
-    if (j>=31) { \
-      unsigned int h=hash(hl); \
-      unsigned int hi=h&0x7ffffff; \
-      for (k=0; k<BUCKET && index[hi+k]; ++k) { \
-        int m=0; \
-        if ((index[hi+k]^h)<0x8000000) { \
-          unsigned int ptr=(index[hi+k]&0x7ffffff)*32+31-j; \
-          ++matches[n+1]; \
-          m=rmatch(ref, ptr, bbuf, len, 1); \
-          if (m>bm) bm=m, bptr=ptr; \
-        } \
-      } \
-    } \
-  } \
-  for (hl=0,j=len-1; j>=0; --j) { \
-    hl=hl*4+3-bbuf[j]; \
-    if (j<=len-32) { \
-      unsigned int h=hash(hl); \
-      unsigned int hi=h&0x7ffffff; \
-      for (k=0; k<BUCKET && index[hi+k]; ++k) { \
-        int m=0; \
-        if ((index[hi+k]^h)<0x8000000) { \
-          unsigned int ptr=(index[hi+k]&0x7ffffff)*32+31+j; \
-          ++matches[n+2]; \
-          m=rmatch(ref, ptr, bbuf, len, -1); \
-          if (m>bm) bm=m, bptr=ptr, bdir=-1; \
-        } \
-      } \
-    } \
-  } \
-  ++matches[bm>>24&127]; \
-  match_sum+=(bm>>24)&127; \
-  match_sum-=(bm^bm<<8)>0xffffff; \
-  match_sum-=(bm<<8^bm<<16)>0xffffff; \
-  match_sum-=(bm<<16^bm<<24)>0xffffff; \
-  base_sum+=len; \
-  ismatch=(bm>>23)>=len; \
-  if (!ismatch) \
-    putc(0, out1); \
-  else { \
-    putc(1+bm+128*(bdir<0), out1); \
-    putc(1+(bm>>8), out1); \
-    putc(1+(bm>>16), out1); \
-    putc(1+(bm>>24), out1); \
-    putc(bptr>>24, out1); \
-    putc(bptr>>16, out1); \
-    putc(bptr>>8, out1); \
-    putc(bptr, out1); \
-  } \
-  outputMismatch(len,ismatch,bm,bbuf,base,out2); \
-}while(0)
-
-
-#define encodeQual(in,quality,hbuf,n,out) \
-do{ \
-  int i, j, k, len, c; \
-  for (len=0,j=k=0,i=0; (c=in[i])!=0; ++i, k=j, j=c) { \
-    if (c!=10 && (c<33 || c>104)) error("expected quality score in 33..104"); \
-    if (hbuf[i]=='N') c=33; \
-    if (quality>1 && c>35) c-=(c-35)%quality; \
-    if (c==35 && (len==0 || j==35)) ++len; \
-    else if (len==0 && c>=64 && c<=71) ++len; \
-    else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len; \
-    else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len; \
-    else if (c==10 && (len==0 || j==35)) break; \
-    else {   \
-      ++len;   \
-      while (len>1 && j==35) \
-        putc(3, out), --len; \
-      if (len>3 && j==71 && k==71) \
-        putc(199+len, out), len=1; \
-      if (len==3) { \
-        if (c>=68 && c<=71) \
-          putc(137+(k-68)+4*(j-68)+16*(c-68), out), len=0; \
-        else \
-          putc(73+(k-64)+8*(j-64), out), len=1; \
-      } \
-      if (len==2) { \
-        if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out), len=0; \
-        else putc(j-32, out), len=1; \
-      } \
-      if (len==1) { \
-        if (c==10) break; \
-        if (c!=35 && (c<64 || c>71)) putc(c-32, out), len=0; \
-      } \
-    } \
-  } \
-  putc(0, out); \
-  if (i!=n) error("wrong number of quality scores"); \
-}while(0)
-
-#define print_match_statistics(base_sum,match_sum,matches,n) \
-do{ \
-  if (base_sum) { \
-    printf("matches[0..%d+2]=", n); \
-    int i; \
-    for (i=0; i<=n+2; ++i) { \
-      printf("%d ", matches[i]); \
-      if (i%10==0) printf("\n"); \
-    } \
-    printf("\nMatched %d of %d bases (%1.2f%%)\n",match_sum, base_sum, match_sum*100.0/base_sum); \
-  } \
-}while(0)
-
 int main(int argc, char** argv) {
 
   // Start timer
@@ -727,7 +529,7 @@ int main(int argc, char** argv) {
   int quality=atoi(argv[1]+1);
   if (quality<1) quality=1;
   const int isref=argc>4;    // 1 if a reference file supplied
-  //const int BUCKET=8;        // index bucket size
+  const int BUCKET=8;        // index bucket size
   libzpaq::Array<unsigned char> ref;  // copy of packed reference genome
   libzpaq::Array<unsigned int> index; // hash table index to ref
 
@@ -736,86 +538,283 @@ int main(int argc, char** argv) {
 
     // Read reference file
     if (isref) {
-      readref(ref, argv[4]);
-      printf("load ref at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
-      string fn=string(argv[4])+".index";
-      readindex(index, fn.c_str());
-      printf("load index at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
+      readref(ref, argv[4]);  // read into ref
+
+      // Create an index. Divide ref into groups of 32 bases (8 bytes)
+      // and compute a 32 bit hash, h. Use the low 27 bits as a hash index
+      // and high 5 bits as a hash checksum. Store the checksum and a
+      // 27 bit pointer into ref packed into index[h].
+      if (cmd=='c' || cmd=='e') {
+        index.resize((1<<27)+BUCKET);
+        int collisions=0;
+        for (int i=N; i<=int(ref.size())-N-8; i+=8) {
+          unsigned long long hl=0;
+          for (int j=0; j<8; ++j) hl=hl<<8|ref[i+j];
+          unsigned int h=hash(hl);
+          unsigned int hi=h&0x7ffffff;
+          int j;
+          for (j=0; j<BUCKET && index[hi+j]; ++j);
+          if (j==BUCKET) ++collisions;
+          else index[hi+j]=(h&0xf8000000)+(i>>3);
+        }
+        printf("indexed %s: %d of %lu collisions\n",
+          argv[4], collisions, ref.size()/8);
+      }
     }
 
     // read input files
-    FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
+    gzFile in;
+    FILE *out[5];  // fastq, fxh, fxb, fxq, fxa
     int n, i, j, k, len, c;
-    gzFile in=open_input_stream(argv[2]);
+    //in=fopen(argv[2], "rb");
+    in=open_input_stream(argv[2]);
     if (!in) perror(argv[2]), exit(1);
-    openOutputFiles(isref,argv[3],out);
-    printf("open outfile at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
+    for (i=0; i<3+isref; ++i) {
+      string fn=string(argv[3])+".fx"+"hbqa"[i];
+      out[i]=fopen(fn.c_str(), "wb");
+      if (!out[i]) perror(fn.c_str()), exit(1);
+    }
 
     int qscale_index = fastq_qualscale(argv[2], in);
     string fn=string(argv[3])+".fxs";
-    FILE *out_qscale=fopen(fn.c_str(), "wb");
-    if (!out_qscale) perror(fn.c_str()), exit(1);
-    fprintf(out_qscale,"%d",qscale_index);
-    fclose(out_qscale);
-    printf("check quality scale at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
+    out[4]=fopen(fn.c_str(), "wb");
+    if (!out[4]) perror(fn.c_str()), exit(1);
+    fprintf(out[4],"%d",qscale_index);
+    fclose(out[4]);
 
     // Save read length, n
-    getReadLength(n,in,argv[2],argv[3]);
-    saveReadLength(n,out[0]);
-    printf("test read length at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
+    for (i=j=n=0; (c=gzgetc(in))!=EOF && !n; ++i) {
+      if (c==10 && j) n=i-j-1;
+      else if (c==10) j=i;
+    }
+    if (n<1 || n>=N) error("read length must be 1..4095");
+    printf("encoding %s -> %s read length %d\n",
+      argv[2], argv[3], n);
+    gzrewind(in);
+    putc(n>>8, out[0]);
+    putc(n&255, out[0]);
 
     // encode
     int base=0;  // packed bases in base 4
     unsigned char hbuf[N]={0};  // previous header
     unsigned char bbuf[N]={0};  // one sequence
-    int matches[N+3]={0},match_sum=0, base_sum=0;
+    int matches[N+3]={0};
+    int match_sum=0, base_sum=0;
     int line=0;
-    
-    int blockSize = 640000,eofFlag=0,bi=0;
-    char *LineBuf = (char *)calloc(N,sizeof(char)),*p=NULL;
-    Fastq *chunk=(Fastq *)calloc(blockSize,sizeof(Fastq));
-    if (qscale_index >1 || qscale_index<0) {
-      for (line=0; 1; line++) {
-        int blockIndex = line % blockSize;
-        if ((!blockIndex && line) || eofFlag){
-          int chunkLen = !blockIndex ? blockSize : blockIndex-1;
-          for (bi=0; bi < chunkLen; ++bi){
-            for (p=(chunk+bi)->quality;*p!=10;p++) *p-=31;
-            encodeHeader((chunk+bi)->name,hbuf,out[0]);
-            readBase((chunk+bi)->seq,len,n,hbuf);
-            mapping(len,n,bbuf,index,ref,matches,match_sum,base_sum,base,out[3],out[1]);
-            encodeQual((chunk+bi)->quality,quality,hbuf,n,out[2]);
-            free_Fastq(chunk+bi);
+    bool ismatch=false;
+    for (line=0; 1; ++line) {
+
+      // encode header as (j+1,k+1,len+1,xxx,0) meaning
+      // add k to hbuf[..j], then len bytes match, followed by xxx,10.
+      for (i=j=k=len=0; (c=gzgetc(in))!=EOF && c!=10; ++i) {
+        if (i>=N) error("Line too long\n");
+        if (c!=hbuf[i] && isdigit(c) && isdigit(hbuf[i]) && j<254
+            && i<254 && i==len && (!j || j==i)) {
+          int d=k*10+c-hbuf[i];
+          if (d>0 && d<254) hbuf[i]=c, k=d, j=i+1;
+        }
+        if (c==hbuf[i] && i==len && len<254) ++len;
+        hbuf[i]=c;
+      }
+      if (c==EOF) {
+        if (i) error("unexpected EOF in header");
+        break;  // done
+      }
+      putc(j+(j==0), out[0]);
+      putc(k+1, out[0]);
+      putc(len+1, out[0]);
+      for (j=len; j<i; ++j) putc(hbuf[j], out[0]);
+      putc(0, out[0]);
+
+      // read base calls into bbuf coded as ACGT=0..3
+      memset(hbuf,0,N);
+      for (i=0, len=0; (c=gzgetc(in))!=EOF && c!=10; ++i) {
+        if (c==EOF) error("unexpected EOF");
+        if (c!='N') {
+          j=(c=='A')+(c=='C')*2+(c=='G')*3+(c=='T')*4;
+          if (!j) error("expected base A,C,G,T,N");
+          bbuf[len++]=j-1;
+        }
+        hbuf[i]=c;
+      }
+      if (i!=n) error("wrong number of base calls");
+
+      // Search for matches in the reference genome
+      int bm=0;  // best match length
+      if (isref) {
+        unsigned long long hl=0;
+        unsigned int bptr=0;  // best match index
+        int bdir=1;  // best match direction, -1 if reversed
+
+        // search in the forward direction
+        for (j=0; j<len; ++j) {
+          hl=hl*4+bbuf[j];
+          if (j>=31) {
+            unsigned int h=hash(hl);
+            unsigned int hi=h&0x7ffffff;
+            for (k=0; k<BUCKET && index[hi+k]; ++k) {
+              int m=0;
+              if ((index[hi+k]^h)<0x8000000) {
+                unsigned int ptr=(index[hi+k]&0x7ffffff)*32+31-j;
+                ++matches[n+1];
+                m=rmatch(ref, ptr, bbuf, len, 1);
+                if (m>bm) bm=m, bptr=ptr;
+              }
+            }
           }
         }
-        if (eofFlag) break;
-        eofFlag = readNextNode(in,LineBuf,&chunk[blockIndex]);   
-      }
-    }else{
-      for (line=0; 1; line++) {
-        int blockIndex = line % blockSize;
-        if ((!blockIndex && line) || eofFlag){
-          int chunkLen = !blockIndex ? blockSize : blockIndex-1;
-          for (bi=0; bi < chunkLen; ++bi){
-            encodeHeader((chunk+bi)->name,hbuf,out[0]);
-            readBase((chunk+bi)->seq,len,n,hbuf);
-            mapping(len,n,bbuf,index,ref,matches,match_sum,base_sum,base,out[3],out[1]);
-            encodeQual((chunk+bi)->quality,quality,hbuf,n,out[2]);
-            free_Fastq(chunk+bi);
+
+        // search for complementary matches
+        hl=0;
+        for (j=len-1; j>=0; --j) {
+          hl=hl*4+3-bbuf[j];
+          if (j<=len-32) {
+            unsigned int h=hash(hl);
+            unsigned int hi=h&0x7ffffff;
+            for (k=0; k<BUCKET && index[hi+k]; ++k) {
+              int m=0;
+              if ((index[hi+k]^h)<0x8000000) {
+                unsigned int ptr=(index[hi+k]&0x7ffffff)*32+31+j;
+                ++matches[n+2];
+                m=rmatch(ref, ptr, bbuf, len, -1);
+                if (m>bm) bm=m, bptr=ptr, bdir=-1;
+              }
+            }
           }
         }
-        if (eofFlag) break;
-        eofFlag = readNextNode(in,LineBuf,&chunk[blockIndex]);
+        ++matches[bm>>24&127];
+        match_sum+=(bm>>24)&127;
+        match_sum-=(bm^bm<<8)>0xffffff;
+        match_sum-=(bm<<8^bm<<16)>0xffffff;
+        match_sum-=(bm<<16^bm<<24)>0xffffff;
+        base_sum+=len;
+
+        // write mismatch locations and pointer to reference genome
+        ismatch=(bm>>23)>=len;
+        if (!ismatch)
+          putc(0, out[3]);
+        else {
+          putc(1+bm+128*(bdir<0), out[3]);
+          putc(1+(bm>>8), out[3]);
+          putc(1+(bm>>16), out[3]);
+          putc(1+(bm>>24), out[3]);
+          putc(bptr>>24, out[3]);
+          putc(bptr>>16, out[3]);
+          putc(bptr>>8, out[3]);
+          putc(bptr, out[3]);
+        }
       }
+
+      // write the bases
+      for (i=0; i<len; ++i) {
+        if (!ismatch || i>=(bm>>24&255) || i==(bm>>16&255) || i==(bm>>8&255)
+            || i==(bm&255)) {
+          j="\x01\x03\x04\x02"[bbuf[i]];  // ACGT -> ATCG
+          if (base*4+j>255) putc(base, out[1]), base=0;
+          base=base*4+j;
+        }
+      }
+
+      // verify empty second header "+\n"
+      if (gzgetc(in)!='+') error("expected +");
+      if (gzgetc(in)!=10) error("expected newline after +");
+
+      // encode quality scores
+      // c=33..104 -> c-32
+      // j,c=64..71 -> 73+(j-64)+8*(c-64)
+      // k,j,c=68..71 -> 137+(k-68)+4*(j-68)+16*(c-68)
+      // 35...,10 -> 0
+      // 71... -> 200+len
+      len=0; // pending output bytes
+      j=k=0; // last 2 bytes
+      if (qscale_index >1 || qscale_index<0) {
+        for (i=0; (c=gzgetc(in))!=EOF; ++i, k=j, j=c) {
+          if (c!=10) {
+            c-=31;
+            if (c<33 || c>104) error("expected quality score in 33..104");
+          }
+          if (hbuf[i]=='N') c=33;
+          if (quality>1 && c>35) c-=(c-35)%quality;
+          if (c==35 && (len==0 || j==35)) ++len;
+          else if (len==0 && c>=64 && c<=71) ++len;
+          else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len;
+          else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len;
+          else if (c==10 && (len==0 || j==35)) break;
+          else {  // must write pending output
+            ++len;  // c is pending
+            while (len>1 && j==35)
+              putc(3, out[2]), --len;
+            if (len>3 && j==71 && k==71)
+              putc(199+len, out[2]), len=1;
+            if (len==3) {
+              if (c>=68 && c<=71)
+                putc(137+(k-68)+4*(j-68)+16*(c-68), out[2]), len=0;
+              else
+                putc(73+(k-64)+8*(j-64), out[2]), len=1;
+            }
+            if (len==2) {
+              if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out[2]), len=0;
+              else putc(j-32, out[2]), len=1;
+            }
+            if (len==1) {
+              if (c==10) break;
+              if (c!=35 && (c<64 || c>71)) putc(c-32, out[2]), len=0;
+            }
+          }
+        }
+      }else{
+        for (i=0; (c=gzgetc(in))!=EOF; ++i, k=j, j=c) {
+          if (c!=10 && (c<33 || c>104))
+            error("expected quality score in 33..104");
+          if (hbuf[i]=='N') c=33;
+          if (quality>1 && c>35) c-=(c-35)%quality;
+          if (c==35 && (len==0 || j==35)) ++len;
+          else if (len==0 && c>=64 && c<=71) ++len;
+          else if (len==1 && c>=68 && c<=71 && j>=68 && j<=71) ++len;
+          else if (len>=2 && len<55 && k==71 && j==71 && c==71) ++len;
+          else if (c==10 && (len==0 || j==35)) break;
+          else {  // must write pending output
+            ++len;  // c is pending
+            while (len>1 && j==35)
+              putc(3, out[2]), --len;
+            if (len>3 && j==71 && k==71)
+              putc(199+len, out[2]), len=1;
+            if (len==3) {
+              if (c>=68 && c<=71)
+                putc(137+(k-68)+4*(j-68)+16*(c-68), out[2]), len=0;
+              else
+                putc(73+(k-64)+8*(j-64), out[2]), len=1;
+            }
+            if (len==2) {
+              if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out[2]), len=0;
+              else putc(j-32, out[2]), len=1;
+            }
+            if (len==1) {
+              if (c==10) break;
+              if (c!=35 && (c<64 || c>71)) putc(c-32, out[2]), len=0;
+            }
+          }
+        }
+      }
+      putc(0, out[2]);
+      if (i!=n) error("wrong number of quality scores");
     }
     putc(base, out[1]);
     for (i=2+isref; i>=0; --i) fclose(out[i]);
     gzclose(in);
     index.resize(0);
     ref.resize(0);
-    printf("encode file at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
 
-    print_match_statistics(base_sum,match_sum,matches,n);
+    // print match statistics
+    if (base_sum>0) {
+      printf("matches[0..%d+2]=", n);
+      for (i=0; i<=n+2; ++i) {
+        printf("%d ", matches[i]);
+        if (i%10==0) printf("\n");
+      }
+      printf("\nMatched %d of %d bases (%1.2f%%)\n",
+        match_sum, base_sum, match_sum*100.0/base_sum);
+    }
 
     // compress each temporary file to .zpaq in a separate thread
     if (cmd=='c') {
@@ -881,8 +880,8 @@ int main(int argc, char** argv) {
     in[4]=fopen(fn.c_str(), "rb");
     if (!in[4]) perror(fn.c_str()), exit(1);
     int qscale_index=0;
-    int matched = fscanf(in[4],"%d",&qscale_index);
-    if (matched ) fprintf(stderr,"qscale_index: %d\n",qscale_index);
+    fscanf(in[4],"%d",&qscale_index);
+    fprintf(stderr,"qscale_index: %d\n",qscale_index);
     fclose(in[4]);
     remove(fn.c_str());
 
