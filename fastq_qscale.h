@@ -146,6 +146,20 @@ char *readNext(gzFile fq,char *buf) {
     }
 }
 
+char *readNextFile(FILE *fq,char *buf) {
+    buf=fgets(buf,1024*sizeof(char),fq);
+    if (!feof(fq)) {
+        buf=fgets(buf,1024*sizeof(char),fq);
+        buf=fgets(buf,1024*sizeof(char),fq);
+        buf=fgets(buf,1024*sizeof(char),fq);
+        *(buf+strlen(buf)-1)='\0';
+        char *quality = strdup(buf);
+        return quality;
+    } else {
+        return NULL;
+    }
+}
+
 int readNextNode(gzFile fq,char *buf,Fastq *line) {
     buf=gzgets(fq,buf,1024*sizeof(char));
     if (!gzeof(fq)) {
@@ -163,6 +177,61 @@ int readNextNode(gzFile fq,char *buf,Fastq *line) {
         return 0;
     } else {
         return 1;
+    }
+}
+
+int readNextNodeFile(FILE *fq,char *buf,Fastq *line) {
+    buf=fgets(buf,1024*sizeof(char),fq);
+    if (!feof(fq)) {
+        *(buf+strlen(buf)-1)=0; //remove the last \n in the buf
+        line->name  = strdup(buf);
+        
+        buf=fgets(buf,1024*sizeof(char),fq);
+        *(buf+strlen(buf)-1)=0; //remove the last \n in the buf
+        line->seq = strdup(buf);
+
+        buf=fgets(buf,1024*sizeof(char),fq);
+
+        buf=fgets(buf,1024*sizeof(char),fq);
+        line->quality = strdup(buf);
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+int fastq_qualscaleFile(const char* fn, FILE *fin) {
+    char min_qual = '~', max_qual = '!';
+    char *buf=(char *)calloc(1024,sizeof(char));
+    char* quality = NULL;
+    /* Scales compatible with the data so far. */
+    uint32_t compat_scales=0;
+    size_t n = 100000;
+    while (n-- && (quality = readNextFile(fin, buf)) !=NULL && !single_bit(compat_scales)) {
+        char* q = quality;
+        while (*q) {
+            if (*q < min_qual) min_qual = *q;
+            if (*q > max_qual) max_qual = *q;
+            ++q;
+        }
+        free(quality);
+        quality = NULL;
+        compat_scales = make_bitset(min_qual, max_qual);
+        if (compat_scales == 0 || single_bit(compat_scales)) break;
+    }
+    free(buf);
+    rewind(fin);
+
+    if (compat_scales == 0) {
+        fprintf(stderr,"%s: Unknown scale ['%c', '%c']\n", fn, min_qual, max_qual);
+        return -1;
+    }
+    else {
+        /* low order bit */
+        unsigned int i;
+        for (i = 0; !(compat_scales & (1 << i)); ++i) {}
+        fprintf(stderr,"%s: %s\n", fn, scales[i].description);
+        return i;
     }
 }
 
@@ -189,14 +258,14 @@ int fastq_qualscale(const char* fn, gzFile fin) {
     gzrewind(fin);
 
     if (compat_scales == 0) {
-        printf("%s: Unknown scale ['%c', '%c']\n", fn, min_qual, max_qual);
+        fprintf(stderr,"%s: Unknown scale ['%c', '%c']\n", fn, min_qual, max_qual);
         return -1;
     }
     else {
         /* low order bit */
         unsigned int i;
         for (i = 0; !(compat_scales & (1 << i)); ++i) {}
-        printf("%s: %s\n", fn, scales[i].description);
+        fprintf(stderr,"%s: %s\n", fn, scales[i].description);
         return i;
     }
 }
