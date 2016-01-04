@@ -371,10 +371,8 @@ f: input.fx? -> output
 #include <stdlib.h>
 #include <ctype.h>
 #include <string>
-#include <iostream>
 #include <vector>
 #include <time.h>
-#include "glob/glob.h"
 #include <pthread.h>
 #include "libzpaq.h"
 #include "fastq_qscale.h"
@@ -509,6 +507,7 @@ void readindex(libzpaq::Array<unsigned int>& index, const char* filename) {
   if (!in) perror(filename), exit(1);
   int indexSize = (1<<27)+BUCKET;
   index.resize(indexSize);
+  fprintf(stderr,"%d\n",index.isize());
   if (int(fread(&index[0], sizeof(unsigned int),index.isize(), in))!=indexSize) error("index read error");
   fclose(in);
 }
@@ -537,8 +536,8 @@ do{ \
 
 #define saveReadLength(n,out) \
 do{ \
-  out[L1++]=n& 0xff00; \
-  out[L1++]=n& 0xff; \
+  putc(n>>8, out); \
+  putc(n&255, out); \
 }while(0)
 
 #define encodeHeader(in,hbuf,out) \
@@ -553,11 +552,11 @@ do{ \
     if (c==hbuf[i] && i==len && len<254) ++len; \
     hbuf[i]=c; \
   } \
-  out[L1++]=j+(j==0); \
-  out[L1++]=k+1; \
-  out[L1++]=len+1; \
-  for (j=len; j<i; ++j) out[L1++]=hbuf[j]; \
-  out[L1++]=0; \
+  putc(j+(j==0), out); \
+  putc(k+1, out); \
+  putc(len+1, out); \
+  for (j=len; j<i; ++j) putc(hbuf[j], out); \
+  putc(0, out); \
 }while(0)
 
 #define readBase(in,len,n,hbuf) \
@@ -582,7 +581,7 @@ do{ \
   for (i=0; i<len; ++i) { \
     if (!ismatch || i>=(bm>>24&255) || i==(bm>>16&255) || i==(bm>>8&255) || i==(bm&255)) { \
       j="\x01\x03\x04\x02"[bbuf[i]]; \
-      if (base*4+j>255) out[L2++]=base, base=0; \
+      if (base*4+j>255) putc(base, out), base=0; \
       base=base*4+j; \
     } \
   } \
@@ -635,19 +634,20 @@ do{ \
   base_sum+=len; \
   ismatch=(bm>>23)>=len; \
   if (!ismatch) \
-    out1[L4++]=0; \
+    putc(0, out1); \
   else { \
-    out1[L4++]=1+bm+128*(bdir<0); \
-    out1[L4++]=1+(bm>>8); \
-    out1[L4++]=1+(bm>>16); \
-    out1[L4++]=1+(bm>>24); \
-    out1[L4++]=bptr>>24; \
-    out1[L4++]=bptr>>16; \
-    out1[L4++]=bptr>>8; \
-    out1[L4++]=bptr; \
+    putc(1+bm+128*(bdir<0), out1); \
+    putc(1+(bm>>8), out1); \
+    putc(1+(bm>>16), out1); \
+    putc(1+(bm>>24), out1); \
+    putc(bptr>>24, out1); \
+    putc(bptr>>16, out1); \
+    putc(bptr>>8, out1); \
+    putc(bptr, out1); \
   } \
   outputMismatch(len,ismatch,bm,bbuf,base,out2); \
 }while(0)
+
 
 #define encodeQual(in,quality,hbuf,n,out) \
 do{ \
@@ -664,26 +664,26 @@ do{ \
     else {   \
       ++len;   \
       while (len>1 && j==35) \
-        out[L3++]=3, --len; \
+        putc(3, out), --len; \
       if (len>3 && j==71 && k==71) \
-        out[L3++]=199+len, len=1; \
+        putc(199+len, out), len=1; \
       if (len==3) { \
         if (c>=68 && c<=71) \
-          out[L3++]=137+(k-68)+4*(j-68)+16*(c-68), len=0; \
+          putc(137+(k-68)+4*(j-68)+16*(c-68), out), len=0; \
         else \
-          out[L3++]=73+(k-64)+8*(j-64), len=1; \
+          putc(73+(k-64)+8*(j-64), out), len=1; \
       } \
       if (len==2) { \
-        if (c>=64 && c<=71) out[L3++]=73+(j-64)+8*(c-64), len=0; \
-        else out[L3++]=j-32, len=1; \
+        if (c>=64 && c<=71) putc(73+(j-64)+8*(c-64), out), len=0; \
+        else putc(j-32, out), len=1; \
       } \
       if (len==1) { \
         if (c==10) break; \
-        if (c!=35 && (c<64 || c>71)) out[L3++]=c-32, len=0; \
+        if (c!=35 && (c<64 || c>71)) putc(c-32, out), len=0; \
       } \
     } \
   } \
-  out[L3++]=0; \
+  putc(0, out); \
   if (i!=n) error("wrong number of quality scores"); \
 }while(0)
 
@@ -700,125 +700,19 @@ do{ \
   } \
 }while(0)
 
-#define decodeHeader(in,hbuf,out) \
-  int i, j, k, c; \
-  j=getc(in[0])-1; \
-  if (j==EOF-1) break; \
-  k=getc(in[0])-1; \
-  i=getc(in[0])-1; \
-  if (j<0 || k<0 || i<0) error("bad header"); \
-  for (; i<N && (c=getc(in[0]))!=EOF && c; ++i) hbuf[i]=c; \
-  for (; k && j>=0; --j, k/=10) { \
-    int d=k%10; \
-    hbuf[j]+=d, k-=d; \
-    if (hbuf[j]>'9') hbuf[j]-=10, k+=10; \
-  } \
-  for (j=0; j<i; ++j) putc(hbuf[j], out); \
-  putc(10, out)
-
-
-#define decodeQual(in,qbuf,n) \
-do{ \
-  int i, c; \
-  for (i=0;;) { \
-    c=getc(in[2]); \
-    if (c==EOF) error("unexpected end of .fxq"); \
-    if (i>n) error("missing .fxq terminator"); \
-    if (c==0) { \
-      for (; i<n; ++i) qbuf[i]=35; \
-      break; \
-    } else if (c>=201 && i+c-200<=n) { \
-      while (c-->200) qbuf[i++]=71; \
-    } else if (c>=137 && c<=200 && i<n-2) { \
-      c-=137; \
-      qbuf[i++]=(c&3)+68; \
-      qbuf[i++]=((c>>2)&3)+68; \
-      qbuf[i++]=((c>>4)&3)+68; \
-    } else if (c>=73 && c<=136 && i<n-1) { \
-      c-=73; \
-      qbuf[i++]=(c&7)+64; \
-      qbuf[i++]=((c>>3)&7)+64; \
-    } else if (c>=1 && c<=72 && i<n) { \
-      qbuf[i++]=c+32; \
-    } \
-    else error (".fxq code overflow"); \
-  } \
-  if (i!=n) error("incorrect .fxq read length"); \
-}while(0)
-
-#define decodeAlignment(in,isref,qbuf,ref,base,out) \
-do{ \
-  unsigned int bptr=0; \
-  int bdir=0, miss1=0, miss2=0, miss3=0, miss4=0; \
-  if (isref) { \
-    miss1=getc(in[3]); \
-    if (miss1==EOF) error("unexpcted EOF in .fxa"); \
-    if (miss1) { \
-      if (miss1>=128) { \
-        miss1-=128, bdir=-1; \
-      }else{ \
-        bdir=1; \
-      } \
-      --miss1; \
-      miss2=getc(in[3])-1; \
-      miss3=getc(in[3])-1; \
-      miss4=getc(in[3])-1; \
-      bptr=getc(in[3]); \
-      bptr=bptr*256+getc(in[3]); \
-      bptr=bptr*256+getc(in[3]); \
-      bptr=bptr*256+getc(in[3]); \
-    } \
-  } \
-  int i,j,k; \
-  for (i=k=0; i<n; ++i) { \
-    if (qbuf[i]==33) { \
-      putc('N', out); \
-    }else if (bdir && k!=miss1 && k!=miss2 && k!=miss3 && k<miss4) { \
-      if (bptr/4>=ref.size()) error(".fxa pointer out of bounds"); \
-      j=(ref[bptr/4]>>(6-bptr%4*2))&3; \
-      bptr+=bdir; \
-      if (bdir<0) j=3-j; \
-      putc("ACGT"[j], out); \
-      ++k; \
-    }else { \
-      while (base==0) { \
-        base=getc(in[1]); \
-        if (base==EOF) error("unexpected end of .fxb"); \
-      } \
-      if (base>84) j=(base-21)>>6, base-=j*64; \
-      else if (base>20) j=(base-5)>>4, base-=j*16; \
-      else if (base>4) j=(base-1)>>2, base-=j*4; \
-      else j=base, base=0; \
-      putc(" ATCG"[j], out); \
-      ++k; \
-      bptr+=bdir; \
-    } \
-  } \
-  putc(10, out); \
-}while(0)
-
-#define writeQual33(qbuf,n,out) \
-do{ \
-  int i; \
-  for (i=0; i<n; ++i){ \
-    if (qbuf[i]==33) qbuf[i]=35; \
-    putc(qbuf[i], out); \
-  } \
-}while(0)
-
-#define writeQual64(qbuf,n,out) \
-do{ \
-  int i; \
-  for (i=0; i<n; ++i){ \
-    if (qbuf[i]==33) qbuf[i]=35; \
-    putc(qbuf[i]+31, out); \
-  } \
-}while(0)
-
+/*
+(thread_args+j)->chunk=chunk[j];
+(thread_args+j)->n=n;
+(thread_args+j)->isref=isref;
+(thread_args+j)->quality=quality;
+(thread_args+j)->outfilePrefix = outPrefix.c_str();
+(thread_args+j)->index = index;
+(thread_args+j)->ref = ref;
+(thread_args+j)->chunkLen = chunkLen;
+*/
 typedef struct _thread_arg_
 {
   Fastq *chunk;
-  char **chunkOut;
   int n;
   int isref;
   int quality;
@@ -836,22 +730,17 @@ void *threadEncode64(void *argument){
   int matches[N+3]={0},match_sum=0, base_sum=0;
   FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
   openOutputFiles(thread_arg->isref,thread_arg->outfilePrefix,out);
-  unsigned long long L1=0,L2=0,L3=0,L4=0;
-  saveReadLength(thread_arg->n,thread_arg->chunkOut[0]);
+  saveReadLength(thread_arg->n,out[0]);
   char *p=NULL;
   for (bi=0; bi < thread_arg->chunkLen; ++bi){
     for (p=(thread_arg->chunk+bi)->quality;*p!=10;p++) *p-=31;
-    encodeHeader((thread_arg->chunk+bi)->name,hbuf,thread_arg->chunkOut[0]);
+    encodeHeader((thread_arg->chunk+bi)->name,hbuf,out[0]);
     readBase((thread_arg->chunk+bi)->seq,len,thread_arg->n,hbuf);
-    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,thread_arg->chunkOut[3],thread_arg->chunkOut[1]);
-    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,thread_arg->chunkOut[2]);
+    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,out[3],out[1]);
+    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,out[2]);
     free_Fastq(thread_arg->chunk+bi);
   }
-  thread_arg->chunkOut[1][L2++]=base;
-  fwrite(&thread_arg->chunkOut[0][0],sizeof(char),L1,out[0]);
-  fwrite(&thread_arg->chunkOut[1][0],sizeof(char),L2,out[1]);
-  fwrite(&thread_arg->chunkOut[2][0],sizeof(char),L3,out[2]);
-  fwrite(&thread_arg->chunkOut[3][0],sizeof(char),L4,out[3]);
+  putc(base, out[1]);
   int i;
   for (i=2+thread_arg->isref; i>=0; --i) fclose(out[i]);
   print_match_statistics(base_sum,match_sum,matches,thread_arg->n);
@@ -866,20 +755,15 @@ void *threadEncode33(void *argument){
   int matches[N+3]={0},match_sum=0, base_sum=0;
   FILE *out[4];  // fastq, fxh, fxb, fxq, fxa
   openOutputFiles(thread_arg->isref,thread_arg->outfilePrefix,out);
-  unsigned long long L1=0,L2=0,L3=0,L4=0;
-  saveReadLength(thread_arg->n,thread_arg->chunkOut[0]);
+  saveReadLength(thread_arg->n,out[0]);
   for (bi=0; bi < thread_arg->chunkLen; ++bi){
-    encodeHeader((thread_arg->chunk+bi)->name,hbuf,thread_arg->chunkOut[0]);
+    encodeHeader((thread_arg->chunk+bi)->name,hbuf,out[0]);
     readBase((thread_arg->chunk+bi)->seq,len,thread_arg->n,hbuf);
-    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,thread_arg->chunkOut[3],thread_arg->chunkOut[1]);
-    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,thread_arg->chunkOut[2]);
+    mapping(len,thread_arg->n,bbuf,thread_arg->index,thread_arg->ref,matches,match_sum,base_sum,base,out[3],out[1]);
+    encodeQual((thread_arg->chunk+bi)->quality,thread_arg->quality,hbuf,thread_arg->n,out[2]);
     free_Fastq(thread_arg->chunk+bi);
   }
-  thread_arg->chunkOut[1][L2++]=base;
-  fwrite(&thread_arg->chunkOut[0][0],sizeof(char),L1,out[0]);
-  fwrite(&thread_arg->chunkOut[1][0],sizeof(char),L2,out[1]);
-  fwrite(&thread_arg->chunkOut[2][0],sizeof(char),L3,out[2]);
-  fwrite(&thread_arg->chunkOut[3][0],sizeof(char),L4,out[3]);
+  putc(base, out[1]);
   int i;
   for (i=2+thread_arg->isref; i>=0; --i) fclose(out[i]);
   print_match_statistics(base_sum,match_sum,matches,thread_arg->n);
@@ -887,9 +771,10 @@ void *threadEncode33(void *argument){
 }
 
 int main(int argc, char** argv) {
+
   // Start timer
   clock_t start=clock();
-  long long begin=usec();
+
   // Check command line: {c|d|e|f} input output
   if (argc<4) {
     printf("fastqz v1.5 FASTQ compressor\n"
@@ -908,7 +793,6 @@ int main(int argc, char** argv) {
     __DATE__);
     exit(1);
   }
-  fprintf(stderr,"Current Time is %s",getYearMonthDate());
   const char cmd=argv[1][0]; // c,d,e,f
   int quality=atoi(argv[1]+1);
   if (quality<1) quality=1;
@@ -916,7 +800,7 @@ int main(int argc, char** argv) {
   int ncpu = getNumCores(), 
   blockSize = argc>6 ? atoi(argv[6]) : 640000,
   threads = argc>5 ? atoi(argv[5]) : ncpu;
-//  if (threads > ncpu) threads= ncpu;
+  if (threads > ncpu) threads= ncpu;
   //const int BUCKET=8;        // index bucket size
   libzpaq::Array<unsigned char> ref;  // copy of packed reference genome
   libzpaq::Array<unsigned int> index; // hash table index to ref
@@ -926,14 +810,13 @@ int main(int argc, char** argv) {
     // Read reference file
     if (isref) {
       readref(ref, argv[4]);
-      printf("load ref in %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
+      printf("load ref at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
       string fn=string(argv[4])+".index";
       readindex(index, fn.c_str());
-      printf("load index in %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
-      fprintf(stderr,"load index is %s",getYearMonthDate());
+      printf("load index at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
     }
 
-    int n, i, j, k;
+    int n, i, j, k, len, c;
 
     gzFile in=open_input_stream(argv[2]);
     if (!in) perror(argv[2]), exit(1);
@@ -947,70 +830,55 @@ int main(int argc, char** argv) {
 
     // Save read length, n
     getReadLength(n,in,argv[2],argv[3]);
-    fprintf(stderr,"getReadLength at %s",getYearMonthDate());
 
     int line=0,eofFlag=0,blockCount=0;
     char *LineBuf = (char *)calloc(N,sizeof(char)),ret[32];
     Fastq **chunk=(Fastq **)calloc(threads,sizeof(Fastq *));
-    char ***chunkOut=(char ***)calloc(threads,sizeof(char **));
     char **retBuf = (char **)calloc(threads,sizeof(char *));
     int *chunkLen = (int *)calloc(threads,sizeof(int));
     for (i=0;i<threads;i++){
       retBuf[i]=(char *)calloc(512,sizeof(char));
       chunk[i]=(Fastq *)calloc(blockSize,sizeof(Fastq));
-      chunkOut[i]=(char **)calloc(4,sizeof(char *));
-      chunkOut[i][0]=(char *)calloc(n*2*blockSize,sizeof(char));
-      chunkOut[i][1]=(char *)calloc((n%4 ? n/4+1 : n/4)*blockSize,sizeof(char));
-      chunkOut[i][2]=(char *)calloc(n*blockSize,sizeof(char));
-      chunkOut[i][3]=(char *)calloc(8*blockSize,sizeof(char));
     }
-    fprintf(stderr,"prepare variable  at %.3f s\n",(double)(usec()-begin)/CLOCKS_PER_SEC);
-    fprintf(stderr,"prepare variable at %s",getYearMonthDate());
+
     for (line=0,k=0; 1; line++) {
-      int blockIndex = line % blockSize;
-      if ((!blockIndex && line) || eofFlag) {
-        chunkLen[k++ % threads]=!eofFlag ? blockSize : blockIndex-1;
-        if (!eofFlag||(eofFlag && blockIndex>1)) ++blockCount;
-        int chunkIndex = blockCount % threads;
-        if ((!chunkIndex && line) || eofFlag) {
-          int chunkCount = !eofFlag ? threads : chunkIndex;
-          pthread_t *thread_handle = (pthread_t *)malloc(chunkCount * sizeof(pthread_t));
-          thread_arg_t *thread_args = (thread_arg_t *)malloc(chunkCount* sizeof(thread_arg_t));
-          for (j=0;j<chunkCount ;j++) {
-            sprintf(retBuf[j],"%s.%d",argv[3],((blockCount-1)/threads)*threads+j);
-            (thread_args+j)->chunk=chunk[j];
-            (thread_args+j)->chunkOut=chunkOut[j];
-            (thread_args+j)->n=n;
-            (thread_args+j)->isref=isref;
-            (thread_args+j)->quality=quality;
-            (thread_args+j)->outfilePrefix = retBuf[j];
-            (thread_args+j)->index = index;
-            (thread_args+j)->ref = ref;
-            (thread_args+j)->chunkLen = chunkLen[j];
-            pthread_create(thread_handle+j,NULL,(qscale_index >1 || qscale_index<0) ? threadEncode64 : threadEncode33,thread_args+j);
-          }
-          for(j = 0;j < chunkCount;j++){
-            pthread_join(*(thread_handle + j),NULL);
-          }
-          free(thread_args);
-          free(thread_handle);
+      int chunkIndex = (line/blockSize) % threads;
+      if (((line-1)/blockSize/threads !=line/blockSize/threads && line ) || (eofFlag && chunkLen[chunkIndex]>1)) {
+        fprintf(stderr,"line %d\n",line);
+        int chunkCount = !eofFlag ? threads : chunkIndex+1;
+        blockCount+=chunkCount;
+        pthread_t *thread_handle = (pthread_t *)malloc(chunkCount * sizeof(pthread_t));
+        thread_arg_t *thread_args = (thread_arg_t *)malloc(chunkCount* sizeof(thread_arg_t));
+        for (j=0;j<chunkCount ;j++) {
+          sprintf(retBuf[j],"%s.%d",argv[3],((line-1)/blockSize/threads)*threads+j);
+          (thread_args+j)->chunk=chunk[j];
+          (thread_args+j)->n=n;
+          (thread_args+j)->isref=isref;
+          (thread_args+j)->quality=quality;
+          (thread_args+j)->outfilePrefix = retBuf[j];
+          (thread_args+j)->index = index;
+          (thread_args+j)->ref = ref;
+          (thread_args+j)->chunkLen = chunkLen[j];
+          pthread_create(thread_handle+j,NULL,(qscale_index >1 || qscale_index<0) ? threadEncode64 : threadEncode33,thread_args+j);
         }
+        for(j = 0;j < chunkCount;j++){
+          pthread_join(*(thread_handle + j),NULL);
+        }
+        free(thread_args);
+        free(thread_handle);
+        for(j = 0;j < chunkCount;j++) chunkLen[j]=0;
       }
       if (eofFlag) break;
-      eofFlag = readNextNode(in,LineBuf,&chunk[blockCount % threads][blockIndex]);
+      eofFlag = readNextNode(in,LineBuf,&chunk[chunkIndex][chunkLen[chunkIndex]++]);
+      if (eofFlag) chunkLen[chunkIndex]--;
     }
     gzclose(in);
     index.resize(0);
     ref.resize(0);
-    fprintf(stderr,"encoded file at %s",getYearMonthDate());
-    printf("encoded file in %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
-    fprintf(stderr,"encoded file at %.3f s\n",(double)(usec()-begin)/CLOCKS_PER_SEC);
+    printf("encode file at %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
 
-    // compress each temporary file to .zpaq in a separate thread
-    
     if (cmd=='c') {
       for (k=0;k<blockCount;k++){
-        int2str(k,10,ret);
         pthread_t tid[4];
         pthread_attr_t attr; // thread joinable attribute
         pthread_attr_init(&attr);
@@ -1018,10 +886,12 @@ int main(int argc, char** argv) {
         Job job[4];
         for (i=0; i<3+isref; ++i) {
           job[i].id=i;
+          int2str(k,10,ret);
           job[i].input=string(argv[3])+'.'+string(ret)+".fx"+"hbqa"[i];
           job[i].output=job[i].input+".zpaq";
           pthread_create(&tid[i], &attr, compress, (void*)&job[i]);
         }
+
         // wait until all jobs are done
         for (i=0; i<3+isref; ++i) {
           void* status;
@@ -1033,101 +903,189 @@ int main(int argc, char** argv) {
 
   // decode
   else if (cmd=='d' || cmd=='f') {
-    int i, j,gl_pathc, c, n, bi;
-    char *Pattern=(char *)calloc(1024,sizeof(char)),ret[32];
-    sprintf(Pattern,"%s.*.fx*.zpaq",argv[2]);
-    glob::Glob glob(Pattern);
-    for(gl_pathc = 0; glob; gl_pathc++) {
-      std::cout << glob.GetFileName() << std::endl;
-      glob.Next();
-    }
     // decompress .zpaq
     Job job[4];
     if (cmd=='d') {
-      for (bi=0;bi<gl_pathc/4; bi++) {
-        int2str(bi,10,ret);
-        pthread_t tid[4];
-        pthread_attr_t attr; // thread joinable attribute
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-        for (int i=0; i<3+isref; ++i) {
-          job[i].id=i;
-          job[i].output=string(argv[2])+'.'+string(ret)+".fx"+"hbqa"[i];
-          job[i].input=job[i].output+".zpaq";
-          pthread_create(&tid[i], &attr, decompress, (void*)&job[i]);
-        }
-        // wait until all threads are done
-        for (int i=0; i<3+isref; ++i) {
-          void* status;
-          pthread_join(tid[i], &status);
-        }
+      pthread_t tid[4];
+      pthread_attr_t attr; // thread joinable attribute
+      pthread_attr_init(&attr);
+      pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+      for (int i=0; i<3+isref; ++i) {
+        job[i].id=i;
+        job[i].output=string(argv[2])+".fx"+"hbqa"[i];
+        job[i].input=job[i].output+".zpaq";
+        pthread_create(&tid[i], &attr, decompress, (void*)&job[i]);
+      }
+
+      // wait until all threads are done
+      for (int i=0; i<3+isref; ++i) {
+        void* status;
+        pthread_join(tid[i], &status);
       }
     }
-    fprintf(stderr,"zpaq decompressed in %.3f s at %s",(double)(usec()-begin)/CLOCKS_PER_SEC,getYearMonthDate());
+
     // read reference
     if (isref) readref(ref, argv[4]);
 
+    // open  files
+    FILE *in[5], *out;  // fxh, fxb, fxq, fxa, fastq
+    int i, j, k, c, n;
+    for (i=0; i<3+isref; ++i) {
+      string fn=string(argv[2])+".fx"+"hbqa"[i];
+      in[i]=fopen(fn.c_str(), "rb");
+      if (!in[i]) perror(fn.c_str()), exit(1);
+    }
+    out=fopen(argv[3], "wb");
+    if (!out) perror(argv[3]), exit(1);
+
     string fn=string(argv[2])+".fxs";
-    FILE *inq=fopen(fn.c_str(), "rb");
-    if (!inq) perror(fn.c_str()), exit(1);
+    in[4]=fopen(fn.c_str(), "rb");
+    if (!in[4]) perror(fn.c_str()), exit(1);
     int qscale_index=0;
-    int matched = fscanf(inq,"%d",&qscale_index);
+    int matched = fscanf(in[4],"%d",&qscale_index);
     if (matched ) fprintf(stderr,"qscale_index: %d\n",qscale_index);
-    fclose(inq);
+    fclose(in[4]);
     remove(fn.c_str());
 
-    FILE *out=fopen(argv[3], "wb");
-    if (!out) perror(argv[3]), exit(1);
-    
-    for (bi=0;bi<gl_pathc/4 ; bi++) {
-      int2str(bi,10,ret);
-      FILE *in[4]; //fxh, fxb, fxq, fxa, fastq
-      for (i=0; i<3+isref; ++i) {
-        string fn=string(argv[2])+'.'+string(ret)+".fx"+"hbqa"[i];
-        in[i]=fopen(fn.c_str(), "rb");
-        if (!in[i]) perror(fn.c_str()), exit(1);
+    // get read length, n
+    n=getc(in[0]);
+    n=n*256+getc(in[0]);
+    printf("decoding %s -> %s read length %d\n",
+      argv[2], argv[3], n);
+    if (n<1 || n>=N) error("bad read length");
+
+    // decode
+    int base=0;
+    unsigned char hbuf[N]={0}, qbuf[N]={0};
+    while (1) {
+
+      // decode header
+      j=getc(in[0])-1;  // index of last digit of number to adjust
+      if (j==EOF-1) break;
+      k=getc(in[0])-1;  // amount to add
+      i=getc(in[0])-1;  // number of matched bytes after adjustment
+      if (j<0 || k<0 || i<0) error("bad header");
+      for (; i<N && (c=getc(in[0]))!=EOF && c; ++i) hbuf[i]=c;
+      for (; k && j>=0; --j, k/=10) {
+        int d=k%10;
+        hbuf[j]+=d, k-=d;
+        if (hbuf[j]>'9') hbuf[j]-=10, k+=10;
+      }
+      for (j=0; j<i; ++j) putc(hbuf[j], out);
+      putc(10, out);
+
+      // read quality scores and save in qbuf[0..n-1]
+      // 0 -> pad with 35 and end
+      // c=1..72 -> c+32
+      // c=73..136 -> (c-73)%8+64, (c-73)/8+64
+      // c=137..200 -> (c-137)%4+68, (c-137)/4%4+68, (c-137)%16+68
+      // c=201..255 -> 71 repeated c-200 times
+      for (i=0;;) {
+        c=getc(in[2]);
+        if (c==EOF) error("unexpected end of .fxq");
+        if (i>n) error("missing .fxq terminator");
+        if (c==0) { // end of line
+          for (; i<n; ++i) qbuf[i]=35;
+          break;
+        }
+        else if (c>=201 && i+c-200<=n)
+          while (c-->200) qbuf[i++]=71;
+        else if (c>=137 && c<=200 && i<n-2) {
+          c-=137;
+          qbuf[i++]=(c&3)+68;
+          qbuf[i++]=((c>>2)&3)+68;
+          qbuf[i++]=((c>>4)&3)+68;
+        }
+        else if (c>=73 && c<=136 && i<n-1) {
+          c-=73;
+          qbuf[i++]=(c&7)+64;
+          qbuf[i++]=((c>>3)&7)+64;
+        }
+        else if (c>=1 && c<=72 && i<n) {
+          qbuf[i++]=c+32;
+        }
+        else error (".fxq code overflow");
+      }
+      if (i!=n) error("incorrect .fxq read length");
+
+      // decode match to reference
+      unsigned int bptr=0;  // pointer to match in ref
+      int bdir=0;  // read direction
+      int miss1=0, miss2=0, miss3=0, miss4=0;  // mismatches, ascending order
+      if (isref) {
+        miss1=getc(in[3]);
+        if (miss1==EOF) error("unexpcted EOF in .fxa");
+        if (miss1) {
+          if (miss1>=128) miss1-=128, bdir=-1;
+          else bdir=1;
+          --miss1;
+          miss2=getc(in[3])-1;
+          miss3=getc(in[3])-1;
+          miss4=getc(in[3])-1;
+          bptr=getc(in[3]);
+          bptr=bptr*256+getc(in[3]);
+          bptr=bptr*256+getc(in[3]);
+          bptr=bptr*256+getc(in[3]);
+        }
       }
 
-      n=getc(in[0]);
-      n=n*256+getc(in[0]);
-      if (n<1 || n>=N) error("bad read length");
+      // decode bases
+      for (i=k=0; i<n; ++i) {
+        if (qbuf[i]==33)
+          putc('N', out);
+        else if (bdir && k!=miss1 && k!=miss2 && k!=miss3 && k<miss4) {
+          if (bptr/4>=ref.size()) error(".fxa pointer out of bounds");
+          j=(ref[bptr/4]>>(6-bptr%4*2))&3;
+          bptr+=bdir;
+          if (bdir<0) j=3-j;
+          putc("ACGT"[j], out);
+          ++k;
+        }
+        else {
+          while (base==0) {
+            base=getc(in[1]);
+            if (base==EOF) error("unexpected end of .fxb");
+          }
+          if (base>84) j=(base-21)>>6, base-=j*64;
+          else if (base>20) j=(base-5)>>4, base-=j*16;
+          else if (base>4) j=(base-1)>>2, base-=j*4;
+          else j=base, base=0;
+          putc(" ATCG"[j], out);
+          ++k;
+          bptr+=bdir;
+        }
+      }
+      putc(10, out);
 
-      int base=0;
-      unsigned char hbuf[N]={0}, qbuf[N]={0};
+      // write empty second header
+      putc('+', out);
+      putc(10, out);
+
+      // write quality scores
       if (qscale_index >1 || qscale_index <0){
-        while (1) {
-          decodeHeader(in,hbuf,out);
-          decodeQual(in,qbuf,n);
-          decodeAlignment(in,isref,qbuf,ref,base,out);
-          putc('+', out);putc(10, out);
-          writeQual64(qbuf,n,out);
-          putc(10, out);
+        for (i=0; i<n; ++i){
+          if (qbuf[i]==33) qbuf[i]=35;
+          putc(qbuf[i]+31, out);
         }
       }else{
-        while (1) {
-          decodeHeader(in,hbuf,out);
-          decodeQual(in,qbuf,n);
-          decodeAlignment(in,isref,qbuf,ref,base,out);
-          putc('+', out);putc(10, out);
-          writeQual33(qbuf,n,out);
-          putc(10, out);
+        for (i=0; i<n; ++i){
+          if (qbuf[i]==33) qbuf[i]=35;
+          putc(qbuf[i], out);
         }
       }
-      for (i=2+isref; i>=0; --i) fclose(in[i]);
-      // delete temporary files
-      if (cmd=='d')
-        for (int i=0; i<3+isref; ++i) {
-          string fn= string(argv[2])+'.'+string(ret)+".fx"+"hbqa"[i];
-          remove(fn.c_str());
-        }
+      putc(10, out);
     }
     fclose(out);
-    free(Pattern);
+    for (i=2+isref; i>=0; --i) fclose(in[i]);
+
+    // delete temporary files
+    if (cmd=='d')
+      for (int i=0; i<3+isref; ++i)
+        remove(job[i].output.c_str());
+
     // show results
     printf("decoded %s\n", argv[3]);
   }
-  fprintf(stderr,"finished at %s",getYearMonthDate());
-  printf("finished in %1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
-  fprintf(stderr,"finished at %.3f s\n",(double)(usec()-begin)/CLOCKS_PER_SEC);
+  printf("%1.2f seconds\n", double(clock()-start)/CLOCKS_PER_SEC);
   return 0;
 }

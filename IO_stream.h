@@ -57,7 +57,11 @@ static inline char *getYearMonthDate(void);
 long long usec(void){
 	struct timeval tv;
 	gettimeofday(&tv,NULL);
+#if defined(__APPLE__) && defined(__MACH__) || defined(unix) || defined(linux)
 	return (((long long)tv.tv_sec)*1000000)+tv.tv_usec;
+#else
+	return (((long long)tv.tv_sec)*1000)+tv.tv_usec/1000;
+#endif
 }
 
 char *getYearMonthDate(void){

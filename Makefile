@@ -1,7 +1,7 @@
-default: fastqz fapack fapacks
+default: fastqz fapacks
 
 fastqz: fastqz15.cpp libzpaq.3.pod libzpaq.cpp libzpaq.h
-	g++ -O2 -msse2 fastqz15.cpp libzpaq.cpp -o $@ -lz -lpthread
+	g++ -O2 -msse2 fastqz15.cpp libzpaq.cpp glob/glob_posix.cpp -o $@ -lz -lpthread
 
 fastqz_thread: fastqz15_thread.cpp libzpaq.3.pod libzpaq.cpp libzpaq.h
 	g++ -O2 -msse2 fastqz15_thread.cpp libzpaq.cpp -o $@ -lz -lpthread
