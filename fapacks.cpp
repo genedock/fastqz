@@ -72,7 +72,7 @@ void readref(libzpaq::Array<unsigned char>& ref, const char* filename) {
   rewind(in);
   ref.resize(rlen+N*2);  // pad extra N bytes at each end
   if (int(fread(&ref[N], 1, rlen, in))!=rlen) error("ref read error");
-  printf("%s: length=%d bytes\n", filename, rlen);
+  fprintf(stderr,"%s: length=%d bytes\n", filename, rlen);
   fclose(in);
 }
 
@@ -95,17 +95,17 @@ void buildindex(libzpaq::Array<unsigned char>& ref,libzpaq::Array<unsigned int>&
     if (j==BUCKET) ++collisions;
     else index[hi+j]=(h&0xf8000000)+(i>>3);
   }
-  printf("indexed %s: %d of %lu collisions\n",filename, collisions, ref.size()/8);
+  fprintf(stderr,"indexed %s: %d of %lu collisions\n",filename, collisions, ref.size()/8);
 }
 
 
 int main(int argc, char** argv) {
   if (argc<3)
-    printf("To pack FASTA files: fapack output *.fa\n"), exit(1);
+    fprintf(stderr,"To pack FASTA files: fapack output *.fa\n"), exit(1);
   FILE *out=fopen(argv[1], "wb");
   int b=1, c;
   for (int i=2; i<argc; ++i) {
-    printf("%s\n", argv[i]);
+    fprintf(stderr,"%s\n", argv[i]);
     FILE *in=fopen(argv[i], "rb");
     if (!in) continue;
     bool dna=true;
