@@ -8,6 +8,8 @@
 //#include <err.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
 /*
 typedef pFILE FILE *;
 #define OPEN_STREAM(TYPE,fileno,mode)	\
@@ -49,6 +51,40 @@ static inline FILE *fcreat_outfile(const char *outfile,const char *suffix);
 static inline gzFile open_output_stream(char* filename);
 static inline gzFile creat_outfile(char *outfile,char *suffix);
 static inline gzFile open_input_stream(const char *filename);
+static inline long long usec(void);
+static inline char *getYearMonthDate(void);
+
+long long usec(void){
+	struct timeval tv;
+	gettimeofday(&tv,NULL);
+#if defined(__APPLE__) && defined(__MACH__) || defined(unix) || defined(linux)
+	return (((long long)tv.tv_sec)*1000000)+tv.tv_usec;
+#else
+	return (((long long)tv.tv_sec)*1000)+tv.tv_usec/1000;
+#endif
+}
+
+char *getYearMonthDate(void){
+    time_t current_time;
+    char* c_time_string;
+    /* Obtain current time. */
+    current_time = time(NULL);
+
+    if (current_time == ((time_t)-1)) {
+        (void) fprintf(stderr, "Failure to obtain the current time.\n");
+        exit(EXIT_FAILURE);
+    }
+    /* Convert to local time format. */
+    c_time_string = ctime(&current_time);
+
+    if (c_time_string == NULL) {
+        (void) fprintf(stderr, "Failure to convert the current time.\n");
+        exit(EXIT_FAILURE);
+    }
+    /* Print to stdout. ctime() has already added a terminating newline character. */
+    //(void) printf("Current time is %s", c_time_string);
+    return c_time_string;
+}
 
 FILE *fopen_input_stream(const char *filename){
 	int fd ;

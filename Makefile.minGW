@@ -1,0 +1,11 @@
+#..\x86_64-5.2.0-release-posix-seh-rt_v4-rev1\mingw64\bin\mingw32-make.exe -f Makefile.minGW
+default: fastqz fapacks
+
+fastqz: fastqz15.cpp libzpaq.3.pod libzpaq.cpp libzpaq.h
+	g++ -O2  fastqz15.cpp libzpaq.cpp glob\glob_win32.cpp -o fastqz ..\x86_64-5.2.0-release-posix-seh-rt_v4-rev1\mingw64\x86_64-w64-mingw32\lib\libpthread.a ..\x86_64-5.2.0-release-posix-seh-rt_v4-rev1\mingw64\x86_64-w64-mingw32\lib\libz.a
+
+fapacks: fapacks.cpp libzpaq.cpp libzpaq.h
+	g++ -O2 -msse2 fapacks.cpp libzpaq.cpp -o $@
+
+clean:
+	- rm -f fastqz.exe fapacks.exe
