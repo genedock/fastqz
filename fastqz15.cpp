@@ -1076,7 +1076,7 @@ int main(int argc, char** argv) {
     fclose(inq);
     remove(fn.c_str());
 
-    FILE *out=fopen(argv[3], "wb");
+    FILE *out=fopen_output_stream(argv[3]);
     if (!out) perror(argv[3]), exit(1);
     
     for (bi=0;bi<gl_pathc/4 ; bi++) {
